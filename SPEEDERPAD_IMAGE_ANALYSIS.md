@@ -34,6 +34,13 @@ Status: in progress. This note records verified observations and keeps open ques
 - Current upstream Klipper `master` was at `b670adc92bf92b304e76c3c2f36f5d8f98a4e2f1` (2026-11-19) when checked. Its host entrypoint still uses a Python 2 shebang and its Debian installer still creates a Python 2 environment, so the existing Python 2.7 host environment is not by itself proof that an upstream update is impossible. The exact current dependency set and three-instance service integration still need testing.
 - A [public FLSUN issue](https://github.com/Flsun3d/Flsun_Speeder_Pad/issues/8) reports a 4.9.191 aarch64 Speeder Pad kernel and remains open without a source response. This is a useful lead, not yet a direct identification of this image's embedded kernel.
 
+## V400 printer-MCU path
+
+- FLSUN's [V400 printer configuration](https://github.com/Flsun3d/Flsun_Speeder_Pad/blob/main/firmware/V400/printer.cfg) identifies an MKS Robin Nano V2 / STM32F103 and gives the Klipper build settings: 28-KiB bootloader, 8-MHz crystal, and USART3 on PB11/PB10.
+- The [V400 firmware instructions](https://github.com/Flsun3d/Flsun_Speeder_Pad/blob/main/firmware/V400/readme.txt) name the output `Robin_nano35.bin` and flash it from a printer-board SD card.
+- Current upstream still contains the matching [generic Robin Nano V2 config](https://github.com/Klipper3d/klipper/blob/master/config/generic-mks-robin-nano-v2.cfg) and [MKS Robin conversion script](https://github.com/Klipper3d/klipper/blob/master/scripts/update_mks_robin.py). The script converts `out/klipper.bin` to the bootloader-specific image; it is a separate step from building the host Klipper service and uses Python 3.
+- Therefore the host update and V400 MCU update can be built from one chosen Klipper revision, but they are separate outputs and separate flashing operations. The MCU `.bin` is flashed to the printer board, not by writing the Speeder Pad restore image.
+
 ## Working conclusions
 
 - This is a whole-device restore image, not a conventional partitioned OS image that can be rebuilt from a published vendor image-builder repository.
@@ -46,6 +53,7 @@ Status: in progress. This note records verified observations and keeps open ques
 1. Identify the boot/update payloads in the raw regions and the role of the `env` GPT partition; the ext4-looking candidate there is not yet verified as mountable.
 2. Verify the rootfs CPU ABI and how the Allwinner boot/update chain consumes the raw regions.
 3. Determine whether the Gitee Klipper commit is upstream-compatible or contains required device-specific changes; compare it with current Klipper and FLSUN's public fork.
-4. Inspect the remaining vendor service/configuration details needed to update all three host instances safely.
-5. Design image-level validation (GPT/raw layout, filesystem integrity, service startup, network/UI readiness) before producing any flashable image.
+4. Inspect the active V400 instance config and all three service files, then compare the embedded Gitee checkout with current upstream and FLSUN's fork.
+5. Test current Klipper host dependencies on the image's Python 2.7 environment and build the V400 STM32F103 image with the vendor's exact settings.
+6. Design image-level validation (GPT/raw layout, filesystem integrity, service startup, network/UI readiness) before producing any flashable image.
 
