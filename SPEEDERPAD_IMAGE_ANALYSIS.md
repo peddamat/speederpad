@@ -1,6 +1,6 @@
 # Speeder Pad image investigation
 
-Status: in progress. This note records verified observations and keeps open questions separate from conclusions.
+Status: in progress. Scope is to investigate both host Klipper and V400 printer-MCU updates. This note records verified observations and keeps open questions separate from conclusions.
 
 ## Input and image format
 
