@@ -39,6 +39,7 @@ Status: in progress. Scope is to investigate both host Klipper and V400 printer-
 - FLSUN's [V400 printer configuration](https://github.com/Flsun3d/Flsun_Speeder_Pad/blob/main/firmware/V400/printer.cfg) identifies an MKS Robin Nano V2 / STM32F103 and gives the Klipper build settings: 28-KiB bootloader, 8-MHz crystal, and USART3 on PB11/PB10.
 - The [V400 firmware instructions](https://github.com/Flsun3d/Flsun_Speeder_Pad/blob/main/firmware/V400/readme.txt) name the output `Robin_nano35.bin` and flash it from a printer-board SD card.
 - Current upstream still contains the matching [generic Robin Nano V2 config](https://github.com/Klipper3d/klipper/blob/master/config/generic-mks-robin-nano-v2.cfg) and [MKS Robin conversion script](https://github.com/Klipper3d/klipper/blob/master/scripts/update_mks_robin.py). The script converts `out/klipper.bin` to the bootloader-specific image; it is a separate step from building the host Klipper service and uses Python 3.
+- MCU build outline: configure Klipper for STM32F103 / 28-KiB bootloader / 8-MHz crystal / USART3 PB11-PB10, run `make`, then run `python3 scripts/update_mks_robin.py out/klipper.bin out/Robin_nano35.bin`. This is a build outline only; no firmware has been compiled or flashed.
 - Therefore the host update and V400 MCU update can be built from one chosen Klipper revision, but they are separate outputs and separate flashing operations. The MCU `.bin` is flashed to the printer board, not by writing the Speeder Pad restore image.
 
 ## Working conclusions
