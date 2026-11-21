@@ -10,9 +10,11 @@ A PhoenixCard card image (such as FLSUN's Speeder Pad restore image) contains:
 * an IMAGEWTY firmware package starting at sunxi_mbr partition index 1.
 
 The card U-Boot (work mode 0x11) reads the IMAGEWTY package and flashes it to
-the internal eMMC. This tool keeps every vendor byte intact and only rewrites
-what changes: IMAGEWTY item lengths/offsets, the ``V<name>`` additive checksum
-items, and the card GPT so that it describes the new size.
+the internal eMMC. This tool keeps every vendor byte the loaders read intact
+and only rewrites what changes: IMAGEWTY item lengths/offsets, the ``V<name>``
+additive checksum items, and the card GPT so that it describes the new size.
+``make-card`` zeroes unused card-head sectors (leftovers from whatever the
+stock card held before) unless ``--keep-gaps`` is given.
 
 Only the formats observed on the Speeder Pad image are supported (IMAGEWTY
 header version 0x300, unencrypted; sunxi_mbr version 0x200).
@@ -31,7 +33,12 @@ CHUNK = 64 << 20
 
 SUNXI_MBR_SECTOR = 40960
 SUNXI_MBR_SIZE = 16 * 1024
+SUNXI_MBR_COPIES = 4
 SUNXI_MBR_MAGIC = b"softw411"
+
+# Card-mode boot0 (eGON.BT0) and the U-Boot/ATF/SCP/DTB boot package.
+BOOT0_SECTOR = 16
+BOOT_PACKAGE_SECTOR = 32800
 
 IMAGEWTY_MAGIC = b"IMAGEWTY"
 IMAGEWTY_HDR_VERSION = 0x300
@@ -381,6 +388,36 @@ def cmd_repack(args):
     print("wrote %s (%d bytes, %d items)" % (args.output, total, len(items)))
 
 
+def blob_sectors(h, sector, magic_off, magic, len_off, what):
+    h.seek(sector * SECTOR)
+    hdr = h.read(64)
+    if hdr[magic_off:magic_off + len(magic)] != magic:
+        die("no %s at card sector %d" % (what, sector))
+    n = struct.unpack_from("<I", hdr, len_off)[0]
+    if not 0 < n <= 16 << 20:
+        die("implausible %s length %d" % (what, n))
+    return (n + SECTOR - 1) // SECTOR
+
+
+def card_head_used(h, gpt):
+    """Sector ranges [start, end) of the card head that the loaders read.
+
+    Everything else in front of the firmware is unused. Stock cards carry
+    leftovers there from the card's previous contents (FAT fragments, and on
+    FLSUN's v1.4 dump an Android media database).
+    """
+    p1_start, p1_last = struct.unpack_from("<QQ", gpt["entries"], 32)
+    return [
+        (0, 2),  # protective MBR, GPT header
+        (BOOT0_SECTOR, BOOT0_SECTOR + blob_sectors(h, BOOT0_SECTOR, 4, b"eGON.BT0", 16, "boot0")),
+        (BOOT_PACKAGE_SECTOR, BOOT_PACKAGE_SECTOR + blob_sectors(
+            h, BOOT_PACKAGE_SECTOR, 0, b"sunxi-package", 36, "boot package")),
+        (SUNXI_MBR_SECTOR, SUNXI_MBR_SECTOR + SUNXI_MBR_COPIES * SUNXI_MBR_SIZE // SECTOR),
+        (gpt["entries_lba"], gpt["entries_lba"] + 1),
+        (p1_start, p1_last + 1),  # card FAT partition (boot-resource)
+    ]
+
+
 def cmd_make_card(args):
     head_size = os.path.getsize(args.head)
     if head_size % SECTOR:
@@ -393,6 +430,11 @@ def cmd_make_card(args):
         gpt = read_gpt(h, 1)
         if gpt is None or not gpt["header_ok"] or not gpt["entries_ok"]:
             die("card head has no valid primary GPT")
+        used = card_head_used(h, gpt)
+        # PhoenixCard also leaves a copy of the entry array at the standard
+        # LBA 2; keep it in step with the real one at entries_lba.
+        h.seek(2 * SECTOR)
+        lba2_copy = gpt["entries_lba"] != 2 and h.read(gpt["entry_size"]) == gpt["entries"][:gpt["entry_size"]]
     fw_size = os.path.getsize(args.firmware)
     with open(args.firmware, "rb") as fw:
         if fw.read(8) != IMAGEWTY_MAGIC:
@@ -406,10 +448,10 @@ def cmd_make_card(args):
         die("card GPT has no second partition entry to relocate")
 
     fw_end = (base + fw_size + SECTOR - 1) // SECTOR
-    # Layout observed on the stock card: the card's second GPT partition
-    # starts 1024 sectors after the firmware (32-sector aligned) and ends
-    # 2048 sectors (1 MiB) before the end of the card.
-    p2_start = align_up(fw_end + 1024, 32)
+    # Layout observed on the stock cards (v1.2 and v1.4): the card's second
+    # GPT partition starts 1024 sectors after the firmware and ends 2048
+    # sectors (1 MiB) before the end of the card.
+    p2_start = fw_end + 1024
     min_total = p2_start + args.min_p2_sectors + 2049
     total = args.total_sectors or align_up(min_total, 2048)
     if total < min_total:
@@ -425,15 +467,29 @@ def cmd_make_card(args):
         copy_stream(h, o, head_size)
         copy_stream(fw, o, fw_size)
         o.truncate(total * SECTOR)
+        zeroed = 0
+        if not args.keep_gaps:
+            keep = used + ([(2, 3)] if lba2_copy else [])
+            pos = 0
+            for start, end in sorted(keep) + [(head_size // SECTOR, head_size // SECTOR)]:
+                if start > pos:
+                    o.seek(pos * SECTOR)
+                    o.write(bytes((start - pos) * SECTOR))
+                    zeroed += start - pos
+                pos = max(pos, end)
         o.seek(SECTOR)
         o.write(primary)
         o.seek(gpt["entries_lba"] * SECTOR)
         o.write(entries.ljust(SECTOR, b"\0"))
+        if lba2_copy:
+            o.seek(2 * SECTOR)
+            o.write(entries.ljust(SECTOR, b"\0"))
         o.seek((total - 2) * SECTOR)
         o.write(entries.ljust(SECTOR, b"\0"))
         o.write(backup)
-    print("wrote %s: %d sectors (%.2f GiB); firmware ends at sector %d; card p2 %d-%d" % (
-        args.output, total, total * SECTOR / 2**30, fw_end, p2_start, p2_last))
+    print("wrote %s: %d sectors (%.2f GiB); firmware ends at sector %d; card p2 %d-%d; "
+          "zeroed %d unused card-head sectors" % (
+              args.output, total, total * SECTOR / 2**30, fw_end, p2_start, p2_last, zeroed))
 
 
 def cmd_extract(args):
@@ -479,6 +535,8 @@ def main():
     p.add_argument("--total-sectors", type=int, help="card image size in sectors (default: minimal)")
     p.add_argument("--min-p2-sectors", type=int, default=32768,
                    help="minimum size of the trailing card partition (default 16 MiB)")
+    p.add_argument("--keep-gaps", action="store_true",
+                   help="copy unused card-head sectors verbatim instead of zeroing them")
     p.set_defaults(fn=cmd_make_card)
 
     p = sub.add_parser("extract", help="extract one IMAGEWTY item")

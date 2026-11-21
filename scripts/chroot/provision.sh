@@ -205,9 +205,11 @@ PY
 import_config() {  # instance data_dir
     local src="$BUILD/vendor/klipper_config/printer_$1" data="$2" f base
     [ "$IMPORT_STOCK_CONFIG" = 1 ] && [ -f "$src/printer.cfg" ] || return 1
-    for f in "$src"/*.cfg; do
-        base="$(basename "$f")"
+    for f in "$src"/*.cfg "$src"/*/*.cfg; do
+        [ -f "$f" ] || continue
+        base="${f#"$src"/}"
         [ "$base" = timelapse.cfg ] && [ "$INSTALL_TIMELAPSE" = 1 ] && continue
+        as_user mkdir -p "$data/config/$(dirname "$base")"
         sed -E \
             -e "s#(~|$STOCK_HOME)/gcode_files#$data/gcodes#g" \
             -e "s#(~|$STOCK_HOME)/(savedVariables[0-9]*\.cfg)#$data/config/\2#g" \

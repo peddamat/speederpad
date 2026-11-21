@@ -15,6 +15,8 @@ The firmware package is the output of Allwinner's **longan/Tina Linux BSP `pack`
 
 To build a custom image, change `rootfs.fex` (and optionally `boot.fex`), regenerate its `V*.fex` additive checksum, and repack or patch the IMAGEWTY. The vendor bootloaders, kernel and card layout can be kept unchanged.
 
+FLSUN's later v1.4 image (`SPEEDERPADPADV1.4V2_TFCARD-230907`) has a byte-identical boot chain and kernel; only the rootfs changed. Its rootfs also adds a remotely triggerable `rm -rf /` helper. See [SPEEDERPAD_V1.2_VS_V1.4.md](./SPEEDERPAD_V1.2_VS_V1.4.md).
+
 ## Input and raw image
 
 - Input: [SPEEDERPADPADV1.2V2_TFCARD-230303.img.xz](./SPEEDERPADPADV1.2V2_TFCARD-230303.img.xz), 1,447,861,192 bytes, SHA-256 `9fc2bd41e8bd81166ed7e83fca1b5aae13ea216fc35ba53061e7ef132179860b` (re-verified).
@@ -145,6 +147,8 @@ The rootfs partition (about 14.5 GiB) is much larger than the 5.28 GiB ext4 insi
 - Klipper checkout: branch `master`, commit `e002f0cfa9358c4a9abb66ab43bc018fc8f86981`, remote `https://gitee.com/leexxiangyang/klipper.git` (re-verified).
 - **That commit is in FLSUN's [klipper_fs](https://github.com/Flsun3d/klipper_fs)** (2022-06-09, "update klippy/extras/virtual_sdcard.py"). It is **not** in upstream `Klipper3d/klipper`. The Gitee repository is therefore the same FLSUN fork lineage. `klipper_fs` is not a GitHub fork (`fork=false`), so its upstream base commit still has to be determined.
 - Carried over from the previous pass, not yet re-checked: the Gitee `master` matching the checkout.
+- Identity baked into the image: three fixed SSH host key pairs in `/etc/ssh`, machine-id `2dc89acf…`, and hostname `speeder-pad`. Every pad restored from this card therefore shares them. The `pi` password is `flsun` (checked against the hash).
+- `/root/crc.raw` is not an image. It is a ZIP (2022-08-22) of the developer's `工作笔记.txt` ("work notes"), covering the BSP path `linux_R818-v18/out/r818-evb2`, the Wi-Fi setup, and how images were captured and locked down. It also contains third-party Wi-Fi passwords (not reproduced).
 
 ## Public sources
 
@@ -167,7 +171,12 @@ Carried over; not affected by the findings above.
 ## How the image was built (reconstructed)
 
 1. **Allwinner longan/Tina BSP** for R818 (`sun50iw10p1`), board based on `r818-evb2`. It builds boot0, U-Boot 2018.05 (Feb 2021 binary), ATF/SCP, the DTB, and Linux 4.9.191 (built Dec 2022). The kernel is packed into an Android-format `boot.fex`.
-2. **Rootfs**: Ubuntu 20.04 **armhf**, apparently a Rockchip-style base (`rockchip.service` first-boot resize), with Klipper (FLSUN fork), Moonraker, Mainsail, KlipperScreen and three printer instances. It was made into a 5.28 GiB ext4 `rootfs.fex` on 2023-03-02. *(inference)* It was most likely captured or prepared from a working pad rather than built from a scripted recipe; no build recipe is published.
+2. **Rootfs**: Ubuntu 20.04 **armhf**, apparently a Rockchip-style base (`rockchip.service` first-boot resize), with Klipper (FLSUN fork), Moonraker, Mainsail, KlipperScreen and three printer instances. It was made into a 5.28 GiB ext4 `rootfs.fex` on 2023-03-02. It was captured from a working pad, not built from a recipe. The developer notes in `/root/crc.raw` describe the process:
+   - image a pad's TF card with `dc3dd` and shrink it with PiShrink, or `rsync -avx --delete / rootfs/` into a loop-mounted image
+   - compile Python modules to `.so` with Cython
+   - remove `pi` from `sudo` and `chmod 700` `rc.local`, `usbmount.sh` and `cfgguard.sh`
+
+   No build recipe is published.
 3. **BSP `pack`** combines `sys_config.fex`, `sys_partition.fex` and the binaries into an IMAGEWTY `.img` with `V*.fex` checksums.
 4. **PhoenixCard (product mode)** writes card-mode boot0/U-Boot (work mode 0x11), the `sunxi_mbr`, a card GPT and the boot-resource FAT to a TF card, then copies the IMAGEWTY starting at the second sunxi partition.
 5. FLSUN edited the card's FAT on Windows (removed logo/magic files, added README/PDF/SSH note). The whole card was then imaged to `.img` and xz-compressed.
@@ -225,7 +234,7 @@ The chosen route keeps the vendor boot chain and replaces the rootfs with a fres
   - creates an ext4 `rootfs.fex` with exactly the stock feature list. Default `mke2fs` features such as `orphan_file` are unknown to the 4.9 kernel.
   - repacks the IMAGEWTY with a regenerated `Vrootfs.fex`;
   - writes the card head plus the new firmware;
-  - rewrites the card GPT (p2 starts 1,024 sectors after the firmware, 32-aligned; it ends 2,048 sectors before the end, matching the stock card), then verifies and compresses the image.
+  - rewrites the card GPT (p2 starts 1,024 sectors after the firmware, unaligned, as on the v1.2 and v1.4 cards; it ends 2,048 sectors before the end), zeroes unused card-head sectors, then verifies and compresses the image.
 - Validation of [sunxi_card.py](scripts/sunxi_card.py): unpacking and repacking the stock card reproduces it byte-for-byte for the entire IMAGEWTY, every byte before the end of the firmware, and the backup GPT. The only difference is the unused trailing card partition, which holds residual data on the stock card and zeros in ours.
 - Build-host findings:
   - WSL masks `systemd-binfmt`, so the scripts register the qemu handler themselves.
@@ -243,6 +252,6 @@ Superseded alternatives: patching the stock armhf rootfs in place (Route A), or 
    - **MCU firmware:** the V400 board ran FLSUN's Klipper `v0.10.0-439-gdfa5afdf` (`stm32f103xe`, USART3, 250000 baud). It was rebuilt from the host's v0.14.0 commit (28 KiB bootloader offset, 8 MHz crystal, USART3), converted with `update_mks_robin.py`, and flashed from a plain MBR/FAT32 SD card. The PhoenixCard TF card is GPT-partitioned and is not read by the board's bootloader. Klipper then loaded the MCU at v0.14.0 (143 commands).
    - **Extruder −70 °C (hardware, not software):** with both the old and the new MCU firmware, `heater_bed` read about 17.5 °C but `extruder` (EPCOS 100K on PC1/TH0, unchanged from stock) read −70 to −76 °C, then shut down with "ADC out of range". That is an open-circuit thermistor reading: check the hotend connector at the effector and TH0, or the thermistor itself.
 2. Read the rest of `rockchip.sh` and the `printer_{1,2,3}` configs to see which instance is the V400, and how the MCU serial port and the KlipperScreen/display are wired.
-3. Check whether SSH host keys and machine IDs are baked into the stock image, since every restored pad would share them. The custom image ships neither.
+3. ~~Check whether SSH host keys and machine IDs are baked into the stock image.~~ Answered: yes, in both v1.2 and v1.4 (see Root filesystem and [SPEEDERPAD_V1.2_VS_V1.4.md](./SPEEDERPAD_V1.2_VS_V1.4.md)). The custom image ships neither and generates them on first boot.
 4. Find the upstream Klipper base of `klipper_fs` at `e002f0cf` and list FLSUN's changes (for example `virtual_sdcard.py`) that imported printer configs might rely on.
 5. Bluetooth: replace the stock 32-bit `brcm_patchram_plus1` with an arm64 build or `hciattach`.

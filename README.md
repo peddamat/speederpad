@@ -17,8 +17,12 @@ the stock image works is documented in
 
 ## What you need
 
-- FLSUN's stock restore image, `SPEEDERPADPADV1.2V2_TFCARD-230303.img.xz`
+- FLSUN's stock restore image, `SPEEDERPADPADV1.2V2_TFCARD-230303.img.xz` or
+  `SPEEDERPADPADV1.4V2_TFCARD-230907.img.xz`
   (from [Flsun3d/Flsun_Speeder_Pad](https://github.com/Flsun3d/Flsun_Speeder_Pad)).
+  Their boot chains and kernels are byte-identical, so either works; they
+  differ only in the stock printer configs that get imported. See
+  [SPEEDERPAD_V1.2_VS_V1.4.md](SPEEDERPAD_V1.2_VS_V1.4.md).
 - One of these build hosts:
   - Debian/Ubuntu Linux or WSL2, with root, and:
     `sudo apt install mmdebstrap qemu-user-static binfmt-support e2fsprogs xz-utils python3 git curl ca-certificates`
@@ -28,7 +32,11 @@ the stock image works is documented in
 
 ## Build
 
-1. Put the stock `.img.xz` in the repository root, or set `STOCK_IMAGE`.
+1. Put the stock `.img.xz` in the repository root, or set `STOCK_IMAGE`. To
+   keep v1.2 as the boot-chain source but import the v1.4 V400 `printer.cfg`
+   (spreadCycle, higher speed limits, `[exclude_object]`), also set
+   `STOCK_CONFIG_IMAGE=SPEEDERPADPADV1.4V2_TFCARD-230907.img.xz`. Setting
+   `STOCK_IMAGE` to the v1.4 file gives the same result.
 2. Review [build.conf](build.conf). In particular, change `PASSWORD` before
    you share an image.
 3. Run one of:
@@ -60,7 +68,7 @@ The build runs in three stages, which you can also run one at a time
 
 | Stage | Script | What it does |
 |---|---|---|
-| extract | [01-extract-vendor.sh](scripts/01-extract-vendor.sh) | Verifies the stock card's checksums. Saves the card head (boot0, card U-Boot, partition tables, FAT) and every firmware item except the rootfs. Copies the Wi-Fi firmware, touchscreen X config and stock printer configs. |
+| extract | [01-extract-vendor.sh](scripts/01-extract-vendor.sh) | Verifies the stock card's checksums. Saves the card head (boot0, card U-Boot, partition tables, FAT) and every firmware item except the rootfs. Copies the Wi-Fi firmware and touchscreen X config, and the stock printer configs (from `STOCK_CONFIG_IMAGE` if set). Nothing else from the stock rootfs is used. |
 | rootfs | [02-build-rootfs.sh](scripts/02-build-rootfs.sh) | Runs `mmdebstrap` for Debian `SUITE`/`ARCH`, then [provision.sh](scripts/chroot/provision.sh) in a qemu chroot. That script runs the upstream Moonraker, KlipperScreen and crowsnest installers unattended and sets up the services. |
 | image | [03-make-image.sh](scripts/03-make-image.sh) | Builds an ext4 `rootfs.fex` with the stock feature set (the 4.9 kernel can't mount newer ext4 features). Repacks the IMAGEWTY firmware with a regenerated `Vrootfs.fex` checksum, assembles the card image, verifies it and compresses it. |
 
@@ -74,9 +82,12 @@ python3 scripts/sunxi_card.py repack items/ fw.img --replace rootfs.fex=my.ext4
 python3 scripts/sunxi_card.py make-card --head head.bin --firmware fw.img --output card.img
 ```
 
-Unpacking the stock card and repacking it with no changes reproduces the
-stock card byte-for-byte, up to the end of the firmware and including the
-backup GPT.
+`make-card` zeroes the unused sectors in front of the firmware. Stock cards
+carry leftovers there from the card's previous contents. Everything the
+loaders read (MBR/GPT, boot0, boot package, sunxi_mbr, card FAT) is copied
+unchanged. With `--keep-gaps`, unpacking a stock card and repacking it with no
+changes reproduces it byte-for-byte, up to the end of the firmware and
+including the backup GPT. This was checked on both v1.2 and v1.4.
 
 ## Flash
 
@@ -105,8 +116,10 @@ To go back, flash the stock image the same way.
     `klipper.service`, `moonraker.service` (port 7125);
   - with `INSTANCES=N`: `~/printer_N_data`, `klipper-N`/`moonraker-N`, ports
     7125 and up.
-- With `IMPORT_STOCK_CONFIG=1`, the stock `printer_N/*.cfg` files are copied
+- With `IMPORT_STOCK_CONFIG=1`, the stock `printer_N/*.cfg` files (and
+  `*.cfg` one directory down, such as v1.4's `adxl345/adxl345.cfg`) are copied
   in, with `~/gcode_files` and `~/savedVariablesN.cfg` paths rewritten.
+  The v1.4 image has only `printer_1`.
   `max_accel_to_decel` (removed from Klipper) is converted to
   `minimum_cruise_ratio`, and `[mcu] serial` uses the board's USB id
   (`/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`) so any pad USB socket

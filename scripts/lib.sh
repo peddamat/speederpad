@@ -22,6 +22,8 @@ load_config() {
     # shellcheck source=/dev/null
     . "$conf"
     STOCK_IMAGE="$(abspath "$STOCK_IMAGE")"
+    STOCK_CONFIG_IMAGE="${STOCK_CONFIG_IMAGE:-}"
+    [ -z "$STOCK_CONFIG_IMAGE" ] || STOCK_CONFIG_IMAGE="$(abspath "$STOCK_CONFIG_IMAGE")"
     WORK_DIR="$(abspath "$WORK_DIR")"
     OUT_DIR="$(abspath "$OUT_DIR")"
     STOCK_DIR="${WORK_DIR}/stock"
