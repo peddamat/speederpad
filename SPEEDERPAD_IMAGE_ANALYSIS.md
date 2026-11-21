@@ -44,12 +44,15 @@ The card U-Boot strings include `IMAGEWTY`, `run card sprite`, `sprite cartoon u
 
 ## Firmware package (IMAGEWTY) contents
 
-Header: `ram_base=0x04D00000`, `version=0x100234`, PID/VID `0x1234/0x8743`, 37 files. **32-bit overflow:** `image_size` and the `rootfs.fex` length/offset fields wrap at 4 GiB:
+Header: `ram_base=0x04D00000`, `version=0x100234`, PID/VID `0x1234/0x8743`, 37 files. The header `image_size` and every item's data length, file length and offset are **64-bit (lo/hi word pairs)**. An earlier note here claimed a "32-bit overflow"; that was a parsing mistake (the hi words were ignored). For example, `rootfs.fex` has `filelen_lo=1,374,275,584`, `filelen_hi=1`, so its length is 5,669,242,880 bytes.
 
-- `rootfs.fex` stored length 1,374,275,584 is really 1,374,275,584 + 2³² = 5,669,242,880.
-- Items after `rootfs.fex` sit 4 GiB later than their stored offsets.
+Layout rules, confirmed by a byte-exact repack of the stock package with [sunxi_card.py](scripts/sunxi_card.py):
 
-Any repacker or parser must handle this wrap, or the rootfs must be kept under 4 GiB.
+- The 1 KiB header is followed by one 1 KiB item header per file.
+- Item data starts on 1 KiB boundaries.
+- `datalen` is `filelen` rounded up to 16 bytes, zero padded.
+- The gap up to the next 1 KiB boundary (and the tail up to `image_size`) is filled with `0xCD`.
+- There is no checksum over the header; integrity comes from the `V*.fex` items.
 
 Main items (offsets are relative to the IMAGEWTY start):
 
@@ -69,7 +72,7 @@ Main items (offsets are relative to the IMAGEWTY start):
 | `rootfs.fex` | 5,669,242,880 | ext4 root filesystem |
 | `recovery.fex` | 24 | Placeholder text: `recovery part no t used!` |
 
-Every downloadable partition image has a `V<name>.fex` 32-bit additive checksum (sum of little-endian u32 words). All six verified, including `rootfs.fex` at its true length:
+Every downloadable partition image has a `V<name>.fex` 32-bit additive checksum (sum of little-endian u32 words). All six verified:
 
 | Item | Checksum |
 |---|---|
@@ -165,7 +168,7 @@ Carried over; not affected by the findings above.
 
 1. **Allwinner longan/Tina BSP** for R818 (`sun50iw10p1`), board based on `r818-evb2`. It builds boot0, U-Boot 2018.05 (Feb 2021 binary), ATF/SCP, the DTB, and Linux 4.9.191 (built Dec 2022). The kernel is packed into an Android-format `boot.fex`.
 2. **Rootfs**: Ubuntu 20.04 **armhf**, apparently a Rockchip-style base (`rockchip.service` first-boot resize), with Klipper (FLSUN fork), Moonraker, Mainsail, KlipperScreen and three printer instances. It was made into a 5.28 GiB ext4 `rootfs.fex` on 2023-03-02. *(inference)* It was most likely captured or prepared from a working pad rather than built from a scripted recipe; no build recipe is published.
-3. **BSP `pack`** combines `sys_config.fex`, `sys_partition.fex` and the binaries into an IMAGEWTY `.img` with `V*.fex` checksums. The 32-bit size fields overflowed because the rootfs is larger than 4 GiB.
+3. **BSP `pack`** combines `sys_config.fex`, `sys_partition.fex` and the binaries into an IMAGEWTY `.img` with `V*.fex` checksums.
 4. **PhoenixCard (product mode)** writes card-mode boot0/U-Boot (work mode 0x11), the `sunxi_mbr`, a card GPT and the boot-resource FAT to a TF card, then copies the IMAGEWTY starting at the second sunxi partition.
 5. FLSUN edited the card's FAT on Windows (removed logo/magic files, added README/PDF/SSH note). The whole card was then imaged to `.img` and xz-compressed.
 
@@ -206,33 +209,40 @@ Carried over; not affected by the findings above.
 - **A fully from-source, mainline build can boot the board, but will have no screen today.** Mainline A133 has no display driver, so the screen (and KlipperScreen) would not work. Klipper, Moonraker and Mainsail over the network would. Display support would mean porting the BSP display driver or waiting for upstream.
 - **A middle route** keeps the vendor boot0/U-Boot/ATF/SCP and the 4.9 kernel (so the display, touch and GPU keep working) and replaces only the rootfs with a freshly built Debian/Ubuntu image (`debootstrap` + current Klipper/Moonraker/KlipperScreen). That rootfs can be arm64 instead of armhf, because the kernel is arm64 with `CONFIG_COMPAT=y`. This needs an `/etc/fstab`, a first-boot resize and the BSP firmware and udev bits copied over from the stock rootfs.
 
-## Custom-image strategy (proposed, untested)
+## Custom-image build (implemented: option 2)
 
-**Route A — patch in place (recommended first):**
+The chosen route keeps the vendor boot chain and replaces the rootfs with a freshly built Debian image. It is automated in this repository; usage is in [README.md](README.md).
 
-1. Extract `rootfs.fex`.
-2. Modify it offline. Without root on this host, the options are a chroot under a privileged Linux host or VM with **`qemu-arm-static` (armhf)**, or booting the pad and capturing the result. Changes: update Klipper (FLSUN fork rebased on upstream, or upstream plus FLSUN changes), Moonraker, Mainsail and KlipperScreen, keeping the three-instance services. Do not create `/usr/local/first_boot_flag`, so the first-boot resize still runs. Clear the pad-specific runtime state that a fresh image should not ship with (Moonraker databases, logs, `.bash_history`, SSH host keys if regenerated on boot).
-3. Keep `rootfs.fex` exactly 5,669,242,880 bytes, or less with an adjusted IMAGEWTY header.
-4. Recompute the additive checksum and write it to `Vrootfs.fex`.
-5. Write `rootfs.fex` and `Vrootfs.fex` back to the card image at their 4-GiB-corrected offsets.
-6. Recompress the card image.
+- Stage 1, [01-extract-vendor.sh](scripts/01-extract-vendor.sh):
+  - verifies the stock card;
+  - saves the card head (sectors 0–50,175) and all IMAGEWTY items except `rootfs.fex`;
+  - copies the Wi-Fi firmware (`fw_bcm43438a1.bin`, `nvram.txt` for the built-in `bcmdhd` driver), the touchscreen X config, and the stock printer configs.
+- Stage 2, [02-build-rootfs.sh](scripts/02-build-rootfs.sh):
+  - `mmdebstrap` builds Debian bookworm arm64 by default;
+  - [provision.sh](scripts/chroot/provision.sh) runs in a qemu chroot. It installs Klipper (Python 3 venv, prebuilt C helper), Moonraker, KlipperScreen and crowsnest through their own unattended installers, plus Mainsail, moonraker-timelapse and nginx.
+  - It also adds a first-boot service that runs `resize2fs` and generates SSH host keys.
+- Stage 3, [03-make-image.sh](scripts/03-make-image.sh):
+  - creates an ext4 `rootfs.fex` with exactly the stock feature list. Default `mke2fs` features such as `orphan_file` are unknown to the 4.9 kernel.
+  - repacks the IMAGEWTY with a regenerated `Vrootfs.fex`;
+  - writes the card head plus the new firmware;
+  - rewrites the card GPT (p2 starts 1,024 sectors after the firmware, 32-aligned; it ends 2,048 sectors before the end, matching the stock card), then verifies and compresses the image.
+- Validation of [sunxi_card.py](scripts/sunxi_card.py): unpacking and repacking the stock card reproduces it byte-for-byte for the entire IMAGEWTY, every byte before the end of the firmware, and the backup GPT. The only difference is the unused trailing card partition, which holds residual data on the stock card and zeros in ours.
+- Build-host findings:
+  - WSL masks `systemd-binfmt`, so the scripts register the qemu handler themselves.
+  - Ubuntu 24.04's `debian-archive-keyring` (2023.4) lacks Debian's current signing keys, so non-Debian hosts fetch the current keyring package over HTTPS.
+  - The WSL virtual disk lives on C:. When the host disk filled up during decompression, the Linux filesystem was remounted read-only.
 
-The boot chain, card layout and PhoenixCard metadata stay untouched.
-
-**Route B — full repack:** rebuild the IMAGEWTY with a repacker (for example the open-source `awutils`/`imgrepacker`), fixing the 32-bit size overflow. Then write it with PhoenixCard, or reproduce the card layout from the table above.
-
-**Route C — post-flash update:** restore the stock image, then update Klipper on the device over SSH. This is the lowest risk for the host side, but it does not produce a reusable image.
-
-Before building, confirm:
-
-- whether the IMAGEWTY header or `dlinfo.fex` holds checksums or sizes that sprite verifies beyond the `V*.fex` files;
-- whether sprite accepts a `rootfs.fex` whose size differs from the original.
+Superseded alternatives: patching the stock armhf rootfs in place (Route A), or updating over SSH after restoring the stock image (Route C). Both are still valid but produce no reproducible image.
 
 ## Open questions / next investigation
 
-1. Confirm what the card sprite verifies, using the `dlinfo.fex` layout and the IMAGEWTY header checksum fields. Test Route A on a spare card before using it on a pad.
+1. **Hardware test (done, 2026-11-20).** The repacked card flashes with sprite, and Debian 12 (systemd 252) boots on the 4.9 kernel. Problems found on hardware, all now fixed in the build scripts:
+   - **Kernel `clock_getres` bug:** the vendor 4.9.191 arm64 vDSO returns `tv_nsec = 547619211008` (about 547 s) for `CLOCK_REALTIME`/`CLOCK_MONOTONIC`. `CLOCK_BOOTTIME`, which uses the system call, correctly returns 1 ns. Python sets `asyncio`'s `_clock_resolution` from this value, so `wait_for()` and every timer due within ~9 minutes fires at once. That broke KlipperScreen's websocket pings, Moonraker's D-Bus and `git` calls, and made touch look broken. The stock armhf userspace used the 32-bit compat vDSO and was not affected. Fix: an `LD_PRELOAD` shim in `/etc/ld.so.preload` that forwards `clock_getres()` to the system call.
+   - **Moonraker polkit rules:** `install-moonraker.sh` calls `set-policykit-rules.sh`, which refuses to run as root, so no rules were installed. The provision script now runs it explicitly.
+   - **Stock config:** `max_accel_to_decel` became `minimum_cruise_ratio`. The printer board's CH340 (`1a86:7523`) is now referenced by USB id; on this pad it enumerated on port `1.2`, not the stock `1.4`.
+   - **MCU firmware:** the V400 board ran FLSUN's Klipper `v0.10.0-439-gdfa5afdf` (`stm32f103xe`, USART3, 250000 baud). It was rebuilt from the host's v0.14.0 commit (28 KiB bootloader offset, 8 MHz crystal, USART3), converted with `update_mks_robin.py`, and flashed from a plain MBR/FAT32 SD card. The PhoenixCard TF card is GPT-partitioned and is not read by the board's bootloader. Klipper then loaded the MCU at v0.14.0 (143 commands).
+   - **Extruder −70 °C (hardware, not software):** with both the old and the new MCU firmware, `heater_bed` read about 17.5 °C but `extruder` (EPCOS 100K on PC1/TH0, unchanged from stock) read −70 to −76 °C, then shut down with "ADC out of range". That is an open-circuit thermistor reading: check the hotend connector at the effector and TH0, or the thermistor itself.
 2. Read the rest of `rockchip.sh` and the `printer_{1,2,3}` configs to see which instance is the V400, and how the MCU serial port and the KlipperScreen/display are wired.
-3. Check whether SSH host keys and machine IDs are baked into the image, since every restored pad would share them.
-4. Find the upstream Klipper base of `klipper_fs` at `e002f0cf` and list FLSUN's changes (for example `virtual_sdcard.py`) that a modern Klipper would need.
-5. Check whether current Klipper, Moonraker and KlipperScreen dependencies install on Ubuntu 20.04 armhf / Python 3.8 (Moonraker currently requires Python ≥ 3.7). Note that armhf may lack prebuilt wheels. Build the V400 STM32F103 firmware with the vendor's settings.
-6. Define validation for any produced card: sunxi_mbr/IMAGEWTY parse, `V*.fex` checksums, `e2fsck`, then on-device checks of service startup, network and UI readiness.
+3. Check whether SSH host keys and machine IDs are baked into the stock image, since every restored pad would share them. The custom image ships neither.
+4. Find the upstream Klipper base of `klipper_fs` at `e002f0cf` and list FLSUN's changes (for example `virtual_sdcard.py`) that imported printer configs might rely on.
+5. Bluetooth: replace the stock 32-bit `brcm_patchram_plus1` with an arm64 build or `hciattach`.

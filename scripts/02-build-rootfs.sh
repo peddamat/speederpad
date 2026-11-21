@@ -27,25 +27,42 @@ if [ "$INSTALL_MCU_TOOLCHAIN" = 1 ]; then
                libnewlib-arm-none-eabi avrdude gcc-avr binutils-avr avr-libc)
 fi
 
-log "Bootstrapping Debian ${SUITE} ${ARCH} into ${ROOTFS_DIR}"
+log "Preparing Debian ${SUITE} ${ARCH} base system in ${ROOTFS_DIR}"
 keyring="$(debian_keyring)"
 echo "  archive keyring: $keyring"
 src_opts="[signed-by=${keyring}]"
+cache_key="$(printf '%s\n' "$SUITE" "$ARCH" "$MIRROR" "$SECURITY_MIRROR" "$components" "${packages[@]}" \
+    | sha256sum | cut -c1-16)"
+cache_tar="${CACHE_DIR}/base-${SUITE}-${ARCH}-${cache_key}.tar"
+tar_opts=(--numeric-owner --xattrs --xattrs-include='*' --acls)
 rm -rf "$ROOTFS_DIR"
-mmdebstrap --mode=root --format=directory --variant=minbase \
-    --architectures="$ARCH" \
-    --keyring="$keyring" \
-    --include="$(IFS=,; echo "${packages[*]}")" \
-    --aptopt='Acquire::Retries "5"' \
-    --aptopt='APT::Install-Recommends "false"' \
-    "$SUITE" "$ROOTFS_DIR" \
-    "deb ${src_opts} ${MIRROR} ${SUITE} ${components}" \
-    "deb ${src_opts} ${MIRROR} ${SUITE}-updates ${components}" \
-    "deb ${src_opts} ${SECURITY_MIRROR} ${SUITE}-security ${components}"
-# The build-host keyring path is meaningless on the pad; use the target's own.
-for f in "${ROOTFS_DIR}/etc/apt/sources.list" "${ROOTFS_DIR}"/etc/apt/sources.list.d/*.list; do
-    if [ -f "$f" ]; then sed -i 's#\[signed-by=[^]]*\] ##' "$f"; fi
-done
+if [ "$CACHE_BASE" = 1 ] && [ -f "$cache_tar" ]; then
+    echo "  restoring cached base system $(basename "$cache_tar")"
+    mkdir -p "$ROOTFS_DIR"
+    tar -xpf "$cache_tar" "${tar_opts[@]}" -C "$ROOTFS_DIR"
+else
+    mmdebstrap --mode=root --format=directory --variant=minbase \
+        --architectures="$ARCH" \
+        --keyring="$keyring" \
+        --include="$(IFS=,; echo "${packages[*]}")" \
+        --aptopt='Acquire::Retries "5"' \
+        --aptopt='APT::Install-Recommends "false"' \
+        "$SUITE" "$ROOTFS_DIR" \
+        "deb ${src_opts} ${MIRROR} ${SUITE} ${components}" \
+        "deb ${src_opts} ${MIRROR} ${SUITE}-updates ${components}" \
+        "deb ${src_opts} ${SECURITY_MIRROR} ${SUITE}-security ${components}"
+    # The build-host keyring path is meaningless on the pad; use the target's own.
+    for f in "${ROOTFS_DIR}/etc/apt/sources.list" "${ROOTFS_DIR}"/etc/apt/sources.list.d/*.list; do
+        if [ -f "$f" ]; then sed -i 's#\[signed-by=[^]]*\] ##' "$f"; fi
+    done
+    if [ "$CACHE_BASE" = 1 ]; then
+        echo "  caching base system as $(basename "$cache_tar")"
+        mkdir -p "$CACHE_DIR"
+        rm -f "${CACHE_DIR}"/base-"${SUITE}-${ARCH}"-*.tar
+        tar -cpf "${cache_tar}.partial" "${tar_opts[@]}" -C "$ROOTFS_DIR" .
+        mv "${cache_tar}.partial" "$cache_tar"
+    fi
+fi
 
 log "Staging build inputs"
 stage="${ROOTFS_DIR}/var/tmp/speederpad-build"

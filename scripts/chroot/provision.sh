@@ -26,6 +26,38 @@ clone() {  # repo ref dest
     echo "  $(basename "$3"): $(as_user git -C "$3" describe --always --tags) ($1 @ $2)"
 }
 
+# setuid sudo cannot elevate under qemu-user unless the host's binfmt handler
+# has the C flag, which most hosts (Ubuntu, WSL, Docker) lack. So upstream
+# installers that refuse root and call sudo run as root, with USER/HOME set to
+# the target user, a pass-through sudo, and their root check disabled in a
+# temporary copy kept next to the original so relative paths still resolve.
+SHIM_DIR=/var/tmp/speederpad-shim
+mkdir -p "$SHIM_DIR"
+cat > "$SHIM_DIR/sudo" <<'EOF'
+#!/bin/sh
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -u|-g|-C|-h|-p) shift 2 ;;
+        --) shift; break ;;
+        -*) shift ;;
+        *) break ;;
+    esac
+done
+exec "$@"
+EOF
+chmod 755 "$SHIM_DIR/sudo"
+
+run_installer() {  # script [args...]
+    local script="$1"; shift
+    local copy; copy="$(dirname "$script")/.speederpad-$(basename "$script")"
+    sed -e 's/"\$EUID" -eq 0/"$EUID" -eq -1/g' -e 's/"\$EUID" == 0/"$EUID" == -1/g' "$script" > "$copy"
+    env HOME="$HOMEDIR" USER="$USERNAME" LOGNAME="$USERNAME" SUDO_USER="$USERNAME" \
+        PATH="$SHIM_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+        "${INSTALLER_ENV[@]}" bash "$copy" "$@"
+    rm -f "$copy"
+}
+git config --system safe.directory '*'
+
 instance_suffix() { [ "$INSTANCES" -eq 1 ] && echo "" || echo "-$1"; }
 instance_data() { [ "$INSTANCES" -eq 1 ] && echo "$HOMEDIR/printer_data" || echo "$HOMEDIR/printer_$1_data"; }
 instance_port() { echo $((7124 + $1)); }
@@ -37,6 +69,11 @@ render() {  # template dest: substitute @VAR@ placeholders
 # Keep package maintainer scripts from starting services in the chroot.
 printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d
 chmod 755 /usr/sbin/policy-rc.d
+
+# The base system may come from the build cache; bring it up to date.
+log "Applying pending Debian updates"
+apt-get update -qq
+apt-get -y -qq full-upgrade >/dev/null
 
 # ---------------------------------------------------------------- base system
 log "Base system: hostname, locale, timezone, user"
@@ -61,9 +98,6 @@ for g in sudo adm dialout tty video input render audio plugdev netdev systemd-jo
     getent group "$g" >/dev/null && usermod -aG "$g" "$USERNAME"
 done
 chmod 755 "$HOMEDIR"
-# Upstream installers call sudo; allow it without a password during the build only.
-echo "${USERNAME} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/99-speederpad-build
-chmod 440 /etc/sudoers.d/99-speederpad-build
 
 cat > /etc/fstab <<'EOF'
 # The vendor kernel mounts the root filesystem from /dev/mmcblk0p5 (eMMC
@@ -77,6 +111,12 @@ mkdir -p /etc/X11/xorg.conf.d
 if compgen -G "$BUILD/vendor/xorg.conf.d/*" >/dev/null; then
     install -m 644 "$BUILD"/vendor/xorg.conf.d/* /etc/X11/xorg.conf.d/
 fi
+
+# The vendor kernel's vDSO clock_getres() reports ~547 s resolution, which
+# makes every asyncio timeout fire immediately; see overlay/src.
+log "Kernel clock_getres workaround"
+gcc -O2 -shared -fPIC -o /usr/local/lib/libclock_getres_fix.so "$BUILD/overlay/src/clock_getres_fix.c"
+echo /usr/local/lib/libclock_getres_fix.so > /etc/ld.so.preload
 
 log "Overlay files"
 cp -rT --no-preserve=mode,ownership "$BUILD/overlay/rootfs" /
@@ -137,6 +177,31 @@ EOF
 done
 
 # ------------------------------------------------------------- printer config
+# Adapt a stock FLSUN printer.cfg (written for their 2022 Klipper fork) to
+# current Klipper:
+#  * max_accel_to_decel was removed; minimum_cruise_ratio = 1 - a2d/max_accel
+#  * the main MCU (MKS Robin Nano CH340) is addressed by its USB id instead of
+#    the fixed pad port, so it works from any of the pad's USB sockets
+upgrade_printer_cfg() {
+    local cfg="$1"
+    python3 - "$cfg" <<'PY'
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+m_acc = re.search(r'^max_accel\s*[:=]\s*([0-9.]+)', text, re.M)
+m_a2d = re.search(r'^max_accel_to_decel\s*[:=]\s*([0-9.]+).*$', text, re.M)
+if m_a2d:
+    ratio = 0.5
+    if m_acc and float(m_acc.group(1)) > 0:
+        ratio = max(0.0, min(1.0, 1 - float(m_a2d.group(1)) / float(m_acc.group(1))))
+    text = text.replace(m_a2d.group(0),
+        "minimum_cruise_ratio: %.3f  # converted from %s" % (ratio, m_a2d.group(0).strip()))
+text = re.sub(r'(?m)^(\[mcu\]\s*\n(?:[^\[\n].*\n)*?)serial:\s*/dev/serial/by-path/\S*ehci1-controller-usb-0:1\.4:1\.0-port0.*$',
+              r'\1serial: /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0  # stock: fixed pad port 1.4', text)
+open(path, "w").write(text)
+PY
+}
+
 import_config() {  # instance data_dir
     local src="$BUILD/vendor/klipper_config/printer_$1" data="$2" f base
     [ "$IMPORT_STOCK_CONFIG" = 1 ] && [ -f "$src/printer.cfg" ] || return 1
@@ -149,6 +214,7 @@ import_config() {  # instance data_dir
             -e "s#(~|$STOCK_HOME)/klipper_config(/printer_[0-9]+)?#$data/config#g" \
             "$f" | as_user tee "$data/config/$base" >/dev/null
     done
+    upgrade_printer_cfg "$data/config/printer.cfg"
     for f in "$BUILD"/vendor/home/savedVariables*.cfg; do
         [ -f "$f" ] || continue
         grep -q "$(basename "$f")" "$data/config/printer.cfg" && as_user cp "$f" "$data/config/"
@@ -172,8 +238,9 @@ clone "$MOONRAKER_REPO" "$MOONRAKER_REF" "$HOMEDIR/moonraker"
 apt-get update -qq
 for i in $(seq 1 "$INSTANCES"); do
     sfx="$(instance_suffix "$i")"; data="$(instance_data "$i")"
-    as_user env MOONRAKER_DISABLE_SYSTEMCTL=y \
-        bash "$HOMEDIR/moonraker/scripts/install-moonraker.sh" -z -a "moonraker${sfx}" -d "$data"
+    INSTALLER_ENV=(MOONRAKER_DISABLE_SYSTEMCTL=y)
+    run_installer "$HOMEDIR/moonraker/scripts/install-moonraker.sh" -z -a "moonraker${sfx}" -d "$data"
+    chown -R "$USERNAME:$USERNAME" "$HOMEDIR"
     {
         cat <<EOF
 # Generated by the Speeder Pad image build. Reference:
@@ -197,12 +264,19 @@ EOF
     } | as_user tee "$data/config/moonraker.conf" >/dev/null
     systemctl enable "moonraker${sfx}.service" >/dev/null
 done
+# The installer's own polkit step calls set-policykit-rules.sh, which refuses
+# to run as root and so silently installs nothing in the chroot.
+INSTALLER_ENV=()
+run_installer "$HOMEDIR/moonraker/scripts/set-policykit-rules.sh" -z
+ls /usr/share/polkit-1/rules.d/moonraker.rules /etc/polkit-1/rules.d/moonraker.rules 2>/dev/null | grep -q . ||
+    { echo "Moonraker polkit rules were not installed" >&2; exit 1; }
 
 # --------------------------------------------------------------- KlipperScreen
 log "KlipperScreen"
 clone "$KLIPPERSCREEN_REPO" "$KLIPPERSCREEN_REF" "$HOMEDIR/KlipperScreen"
-as_user env SERVICE=Y BACKEND=X START=0 NETWORK=Y \
-    bash "$HOMEDIR/KlipperScreen/scripts/KlipperScreen-install.sh"
+INSTALLER_ENV=(SERVICE=Y BACKEND=X START=0 NETWORK=Y)
+run_installer "$HOMEDIR/KlipperScreen/scripts/KlipperScreen-install.sh"
+chown -R "$USERNAME:$USERNAME" "$HOMEDIR"
 systemctl enable KlipperScreen.service >/dev/null
 if [ "$INSTANCES" -eq 1 ]; then
     ks_conf="$(instance_data 1)/config/KlipperScreen.conf"
@@ -276,7 +350,9 @@ fi
 
 # --------------------------------------------------------------------- cleanup
 log "Cleanup"
-rm -f /etc/sudoers.d/99-speederpad-build /usr/sbin/policy-rc.d
+rm -f /usr/sbin/policy-rc.d
+rm -rf "$SHIM_DIR"
+git config --system --unset-all safe.directory || true
 apt-get clean
 rm -rf /var/lib/apt/lists/* /var/cache/apt/*.bin "$HOMEDIR/.cache" /root/.cache /tmp/* /var/tmp/*.zip
 rm -f /etc/ssh/ssh_host_*

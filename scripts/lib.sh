@@ -27,6 +27,7 @@ load_config() {
     STOCK_DIR="${WORK_DIR}/stock"
     VENDOR_DIR="${WORK_DIR}/vendor"
     ROOTFS_DIR="${WORK_DIR}/rootfs"
+    CACHE_DIR="$(abspath "${CACHE_DIR:-${WORK_DIR}/cache}")"
     case "$INSTANCES" in
         ''|*[!0-9]*|0) die "INSTANCES must be a positive integer" ;;
     esac
