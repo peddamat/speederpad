@@ -169,6 +169,43 @@ Carried over; not affected by the findings above.
 4. **PhoenixCard (product mode)** writes card-mode boot0/U-Boot (work mode 0x11), the `sunxi_mbr`, a card GPT and the boot-resource FAT to a TF card, then copies the IMAGEWTY starting at the second sunxi partition.
 5. FLSUN edited the card's FAT on Windows (removed logo/magic files, added README/PDF/SSH note). The whole card was then imaged to `.img` and xz-compressed.
 
+## Is the format proprietary? Can the image be built from source?
+
+### Format and signing
+
+- IMAGEWTY, `sunxi_mbr`, `boot_package`, eGON `boot0` and the `V*.fex` checksums are Allwinner-defined formats, but they are not encrypted or signed. All of them were parsed and verified above with short scripts.
+- Allwinner's own packer (the BSP `pack` script plus closed `dragon`/`update_*` host binaries) is not needed. [OpenixCard](https://github.com/YuzukiTsuru/OpenixCard) is an open-source PhoenixCard replacement that unpacks IMAGEWTY images and writes card images on Linux.
+- **No secure boot is in use.** `toc0.fex` and `toc1.fex` are 8-byte placeholders that just contain their own file names. The card boots a plain `eGON.BT0` boot0 (version string `4.0`, simple additive checksum), which a secure-mode BROM would reject. `[secure]` in `sys_config.fex` reserves no secure DRAM. *(inference)* The SoC's secure-boot fuse is not blown, so unsigned, self-built bootloaders should run. This can only be fully proven by booting one.
+
+### Hardware facts a from-source build needs (from `sys_config.fex` and the DTB)
+
+- DRAM: `dram_type = 4` (DDR4 in Allwinner numbering), `dram_clk = 792`, with the full MR/TPR parameter set in `[dram_para]`.
+- Panel: `lcd0` `default_lcd`, `lcd_if = 0` (parallel RGB), 1024×600, 66 MHz pixel clock.
+- Touch: `ctp_name = gt9xxf_ts`, a Goodix GT9xx controller.
+- GPU: `img,gpu` (`CONFIG_SUNXI_GPU_TYPE="ge8300"`, PowerVR GE8300).
+- Console: UART0 at 115200 baud.
+
+### Open-source support for each part (checked against current upstream trees)
+
+| Component | Vendor image | Open, buildable replacement |
+|---|---|---|
+| Image/card packing | `pack` + PhoenixCard | Our own scripts, or OpenixCard |
+| boot0 + DRAM init | Closed boot0 blob | **Mainline U-Boot SPL**: `arch/arm/mach-sunxi/dram_sun50i_a133.c` exists. Its header says only DDR4 has been tested, which matches this board. |
+| U-Boot | Allwinner 2018.05 fork | Mainline U-Boot (`liontron-h-a133l_defconfig` is a starting point); a Speeder Pad defconfig/DTS must be written |
+| ATF (`monitor`) | Allwinner build | Mainline TF-A `plat/allwinner/sun50i_a133` |
+| SCP (`scp`, ARISC) | Closed blob | Optional for boot; it mainly affects power management/suspend |
+| Linux kernel | Allwinner 4.9.191 BSP, source unpublished | Mainline Linux has `sun50i-a100.dtsi` and A133 boards (`liontron-h-a133l`, `helperboard`, `teclast-p80`). A Speeder Pad DTS must be written. |
+| Display (DE/TCON) | BSP `sunxi-disp` | **Not in mainline**: the `sun4i` DRM driver has no A100/A133 compatibles, and `sun50i-a100.dtsi` has no display nodes |
+| Touch (GT9xx) | BSP `gt9xxf_ts` | Mainline `goodix` driver |
+| GPU (GE8300) | BSP PowerVR blob | No mainline driver; software rendering only |
+| Rootfs | Ubuntu 20.04 armhf | Any Debian/Ubuntu arm64 or armhf rootfs built with debootstrap/mmdebstrap |
+
+### Conclusion
+
+- **The packaging is not a barrier.** A new boot0/U-Boot/kernel/rootfs set can be packed into a card image, or written straight to eMMC, with open tools.
+- **A fully from-source, mainline build can boot the board, but will have no screen today.** Mainline A133 has no display driver, so the screen (and KlipperScreen) would not work. Klipper, Moonraker and Mainsail over the network would. Display support would mean porting the BSP display driver or waiting for upstream.
+- **A middle route** keeps the vendor boot0/U-Boot/ATF/SCP and the 4.9 kernel (so the display, touch and GPU keep working) and replaces only the rootfs with a freshly built Debian/Ubuntu image (`debootstrap` + current Klipper/Moonraker/KlipperScreen). That rootfs can be arm64 instead of armhf, because the kernel is arm64 with `CONFIG_COMPAT=y`. This needs an `/etc/fstab`, a first-boot resize and the BSP firmware and udev bits copied over from the stock rootfs.
+
 ## Custom-image strategy (proposed, untested)
 
 **Route A — patch in place (recommended first):**
