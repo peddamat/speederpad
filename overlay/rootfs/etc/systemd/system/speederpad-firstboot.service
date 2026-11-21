@@ -1,0 +1,13 @@
+[Unit]
+Description=Speeder Pad first boot setup (grow root filesystem, SSH host keys)
+ConditionPathExists=!/var/lib/speederpad/firstboot-done
+After=local-fs.target
+Before=ssh.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/speederpad-firstboot
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,8 @@
+# Vendor input and build products are never committed.
+*.img
+*.img.xz
+*.xz
+*.sha256
+/work/
+/out/
+__pycache__/
