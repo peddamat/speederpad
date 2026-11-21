@@ -145,10 +145,47 @@ The rootfs partition (about 14.5 GiB) is much larger than the 5.28 GiB ext4 insi
   - `klipper_config`, `klipper_logs`, `gcode_files`
   - `savedVariables{1,2,3}.cfg`
 - Klipper checkout: branch `master`, commit `e002f0cfa9358c4a9abb66ab43bc018fc8f86981`, remote `https://gitee.com/leexxiangyang/klipper.git` (re-verified).
-- **That commit is in FLSUN's [klipper_fs](https://github.com/Flsun3d/klipper_fs)** (2022-06-09, "update klippy/extras/virtual_sdcard.py"). It is **not** in upstream `Klipper3d/klipper`. The Gitee repository is therefore the same FLSUN fork lineage. `klipper_fs` is not a GitHub fork (`fork=false`), so its upstream base commit still has to be determined.
+- **That commit is in FLSUN's [klipper_fs](https://github.com/Flsun3d/klipper_fs)** (2022-06-09, "update klippy/extras/virtual_sdcard.py"). It is **not** in upstream `Klipper3d/klipper`. The Gitee repository is therefore the same FLSUN fork lineage. `klipper_fs` is not a GitHub fork (`fork=false`). Its upstream base is `ada571ecb` (v0.10.0-451, 2022-06-06), with 4 FLSUN commits on top (see below).
 - Carried over from the previous pass, not yet re-checked: the Gitee `master` matching the checkout.
 - Identity baked into the image: three fixed SSH host key pairs in `/etc/ssh`, machine-id `2dc89acf…`, and hostname `speeder-pad`. Every pad restored from this card therefore shares them. The `pi` password is `flsun` (checked against the hash).
 - `/root/crc.raw` is not an image. It is a ZIP (2022-08-22) of the developer's `工作笔记.txt` ("work notes"), covering the BSP path `linux_R818-v18/out/r818-evb2`, the Wi-Fi setup, and how images were captured and locked down. It also contains third-party Wi-Fi passwords (not reproduced).
+
+## FLSUN's modifications to the printer software
+
+Checked 2026-11-21. Each pad checkout (including uncommitted edits) was compared with upstream `Klipper3d/klipper`, `Arksine/moonraker` and `KlipperScreen/KlipperScreen`, and with the official Mainsail release zips. Both v1.2 and v1.4 were checked; v1.4 uses the same commits with more local edits (see [SPEEDERPAD_V1.2_VS_V1.4.md](./SPEEDERPAD_V1.2_VS_V1.4.md)).
+
+| Component | Fork point | FLSUN changes |
+|---|---|---|
+| Klipper (`klipper_fs`, `e002f0cf`) | upstream `ada571ecb` (v0.10.0-451, 2022-06-06) | 4 commits, 40 lines; see below |
+| Moonraker (`moonraker_fs`, `bb526e0`) | upstream `d53cf27` (v0.7.1-572, 2022-05-22) | 12 lines: `/machine/shutdown` runs `shutdown -H now` (halt) instead of the systemd D-Bus power-off; the update manager points Klipper/Moonraker at FLSUN's Gitee mirrors; the install script symlinks the timelapse component. v1.4 also removes Moonraker from the update manager (`del self.updaters['moonraker']`). |
+| Mainsail v2.2.1 (v1.2) / v2.4.0 (v1.4) | official release zip | one edit in each: the **DELTA CALIBRATE** button is replaced by **G28** |
+| KlipperScreen (`leexxiangyang/KlipperScreen`) | snapshot of upstream v0.2.2-4 (2022-05-04); no shared Git history | heavy UI fork (about 3,500 changed lines) |
+| moonraker-timelapse | upstream `47e27bd` | v1.4 deletes `LICENSE` (GPL-3.0) and the DCO; `install.sh` is edited |
+
+Klipper changes:
+
+- `heaters.py`: `PID_SETTLE_DELTA` changed from 1 to 3 °C, and the temperature-slope check was removed. `M109`/`M190` therefore return as soon as the heater is within ±3 °C, rather than within 1 °C and stable. Upstream still uses 1 °C plus the slope check.
+- `delta_calibrate` (`delta.py`): `SAVE_CONFIG` stores only `position_endstop` and `arm_length`. Upstream also stores the calibrated `delta_radius` and tower `angle`s. FLSUN also removed the result printout. The stock `SAVE_CONFIG` block therefore keeps the nominal `delta_radius = 161.75` and angles 210/330/90.
+- New `M665 A/B/C` command adds offsets to the arm lengths. New `M205 X` command sets `square_corner_velocity`. Neither the stock configs nor KlipperScreen use them. Upstream has `SET_VELOCITY_LIMIT SQUARE_CORNER_VELOCITY=` instead.
+- `virtual_sdcard.py`: a Python 2 `sys.setdefaultencoding('utf8')` hack for Chinese file names. It isn't needed on Python 3.
+
+KlipperScreen changes:
+
+- FLSUN branding, styles and icons.
+- A printer-model chooser (`guide`, `confie_printer`) that copies per-model `printer.cfg`/`defaults.conf` files and sed-patches `config.py`.
+- Three-port printer switching (`switch_printer`, `usb.sh`, `printer.sh`) that rewrites `/dev/serial/by-path` names.
+- An input shaper panel, an on-screen keyboard, filament-runout popups, and 20–200 % flow / 20–500 % speed limits.
+- The Z calibrate panel is replaced by a Z-offset babystep panel, removing upstream's endstop/probe/delta calibration modes.
+- Shell calls to `xset`, `shutdown -H now` and time-zone files.
+- v1.4 adds a `zoffset` panel and ships `ks_includes/screen_panel.py` only as a Cython-compiled `screen_panel.so`. KlipperScreen is AGPL-3.0, and no source for that module is in the image.
+- `warning.txt` holds UI state only: first-run guide, language, port, and auto-level/ADXL progress flags.
+
+**Useful for our build:** very little. Current upstream KlipperScreen already has input shaper, delta calibration, Z babystepping, an on-screen keyboard and object exclusion. Upstream Moonraker and Mainsail are unmodified in our image. The changes with an effect worth knowing about:
+
+1. **Heater settle tolerance.** If a faster print start is wanted, it can be reproduced without patching Klipper. Use an `M109` macro that sets the target and then calls `TEMPERATURE_WAIT SENSOR=extruder MINIMUM={T-3} MAXIMUM={T+3}`.
+2. **`DELTA_CALIBRATE` now saves radius and angles.** With upstream Klipper (our image), `bed_level_1`/`DELTA_CALIBRATE` also save the calibrated `delta_radius` and tower angles. That is the normal Klipper behavior and generally more accurate. It differs from the stock pad, which locked them at nominal values. If results get worse, restore `delta_radius = 161.75` and the angles 210/330/90 in the `SAVE_CONFIG` block.
+3. **`M205 X` (optional).** A small `M205` macro mapping X to `SET_VELOCITY_LIMIT SQUARE_CORNER_VELOCITY` would silence "Unknown command" messages from slicers that emit jerk settings.
+4. **Shutdown (to test).** FLSUN switched both Moonraker and KlipperScreen to `shutdown -H now` (halt). *(inference)* This was probably a workaround; the reason is unknown. The Shutdown buttons haven't been tested on our image yet.
 
 ## Public sources
 
@@ -253,5 +290,5 @@ Superseded alternatives: patching the stock armhf rootfs in place (Route A), or 
    - **Extruder −70 °C (hardware, not software):** with both the old and the new MCU firmware, `heater_bed` read about 17.5 °C but `extruder` (EPCOS 100K on PC1/TH0, unchanged from stock) read −70 to −76 °C, then shut down with "ADC out of range". That is an open-circuit thermistor reading: check the hotend connector at the effector and TH0, or the thermistor itself.
 2. Read the rest of `rockchip.sh` and the `printer_{1,2,3}` configs to see which instance is the V400, and how the MCU serial port and the KlipperScreen/display are wired.
 3. ~~Check whether SSH host keys and machine IDs are baked into the stock image.~~ Answered: yes, in both v1.2 and v1.4 (see Root filesystem and [SPEEDERPAD_V1.2_VS_V1.4.md](./SPEEDERPAD_V1.2_VS_V1.4.md)). The custom image ships neither and generates them on first boot.
-4. Find the upstream Klipper base of `klipper_fs` at `e002f0cf` and list FLSUN's changes (for example `virtual_sdcard.py`) that imported printer configs might rely on.
+4. ~~Find the upstream Klipper base of `klipper_fs` at `e002f0cf` and list FLSUN's changes.~~ Answered: upstream `ada571ecb` plus 4 small commits; see [FLSUN's modifications to the printer software](#flsuns-modifications-to-the-printer-software). The imported configs don't depend on any of them.
 5. Bluetooth: replace the stock 32-bit `brcm_patchram_plus1` with an arm64 build or `hciattach`.
