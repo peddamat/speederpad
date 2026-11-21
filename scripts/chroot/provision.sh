@@ -217,6 +217,12 @@ import_config() {  # instance data_dir
             "$f" | as_user tee "$data/config/$base" >/dev/null
     done
     upgrade_printer_cfg "$data/config/printer.cfg"
+    if [ "${STOCK_COMPAT_MACROS:-1}" = 1 ]; then
+        as_user cp "$BUILD/overlay/templates/stock-compat.cfg" "$data/config/stock-compat.cfg"
+        grep -q '^\[include stock-compat\.cfg\]' "$data/config/printer.cfg" ||
+            sed -i '1i [include stock-compat.cfg]  # FLSUN-style M109/M190/M205; remove for upstream behaviour' \
+                "$data/config/printer.cfg"
+    fi
     for f in "$BUILD"/vendor/home/savedVariables*.cfg; do
         [ -f "$f" ] || continue
         grep -q "$(basename "$f")" "$data/config/printer.cfg" && as_user cp "$f" "$data/config/"

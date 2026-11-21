@@ -124,6 +124,17 @@ To go back, flash the stock image the same way.
   `minimum_cruise_ratio`, and `[mcu] serial` uses the board's USB id
   (`/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`) so any pad USB socket
   works. Check `klippy.log` for other options current Klipper rejects.
+- With `STOCK_COMPAT_MACROS=1` (default), an imported config also gets
+  [stock-compat.cfg](overlay/templates/stock-compat.cfg), included from the
+  top of `printer.cfg`. It recreates FLSUN's Klipper fork behaviour:
+  - `M109`/`M190` stop waiting once the heater is within 3 °C of the target
+    (upstream: within 1 °C and stable). Adjust `variable_tolerance` in the file.
+  - `M205 X<n>` (slicer jerk) sets `square_corner_velocity`.
+
+  Delete the `[include stock-compat.cfg]` line for upstream behaviour.
+- `DELTA_CALIBRATE` (and the stock `bed_level_1` macro) saves the calibrated
+  `delta_radius` and tower angles on upstream Klipper. FLSUN's fork kept them
+  at 161.75 and 210/330/90; restore those values if calibration gets worse.
 - The V400 printer board must run firmware from the same Klipper version;
   otherwise Klipper refuses to connect with a version or command mismatch.
   Build it on a Linux PC from the same Klipper commit, or on the pad if the

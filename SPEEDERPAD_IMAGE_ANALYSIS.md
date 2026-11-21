@@ -182,9 +182,9 @@ KlipperScreen changes:
 
 **Useful for our build:** very little. Current upstream KlipperScreen already has input shaper, delta calibration, Z babystepping, an on-screen keyboard and object exclusion. Upstream Moonraker and Mainsail are unmodified in our image. The changes with an effect worth knowing about:
 
-1. **Heater settle tolerance.** If a faster print start is wanted, it can be reproduced without patching Klipper. Use an `M109` macro that sets the target and then calls `TEMPERATURE_WAIT SENSOR=extruder MINIMUM={T-3} MAXIMUM={T+3}`.
+1. **Heater settle tolerance.** Implemented in [stock-compat.cfg](./overlay/templates/stock-compat.cfg) without patching Klipper. `M109`/`M190` macros set the target, then run `TEMPERATURE_WAIT` with a ±3 °C window; `R` is accepted like `S`, and `S0` doesn't wait. The build installs it with imported configs when `STOCK_COMPAT_MACROS=1`. It was verified in Klipper batch mode (c9559fa04, V400 config, STM32F103 dictionary).
 2. **`DELTA_CALIBRATE` now saves radius and angles.** With upstream Klipper (our image), `bed_level_1`/`DELTA_CALIBRATE` also save the calibrated `delta_radius` and tower angles. That is the normal Klipper behavior and generally more accurate. It differs from the stock pad, which locked them at nominal values. If results get worse, restore `delta_radius = 161.75` and the angles 210/330/90 in the `SAVE_CONFIG` block.
-3. **`M205 X` (optional).** A small `M205` macro mapping X to `SET_VELOCITY_LIMIT SQUARE_CORNER_VELOCITY` would silence "Unknown command" messages from slicers that emit jerk settings.
+3. **`M205 X`.** Implemented in the same file: X maps to `SET_VELOCITY_LIMIT SQUARE_CORNER_VELOCITY`; other parameters and `X0` are ignored, as in the fork.
 4. **Shutdown (to test).** FLSUN switched both Moonraker and KlipperScreen to `shutdown -H now` (halt). *(inference)* This was probably a workaround; the reason is unknown. The Shutdown buttons haven't been tested on our image yet.
 
 ## Public sources
