@@ -128,7 +128,9 @@ To go back, flash the stock image the same way.
   `max_accel_to_decel` (removed from Klipper) is converted to
   `minimum_cruise_ratio`, and `[mcu] serial` uses the board's USB id
   (`/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`) so any pad USB socket
-  works. Check `klippy.log` for other options current Klipper rejects.
+  works. A stray `|` after `{% endif %}` in FLSUN's `LOAD_GCODE_OFFSETS`
+  macro is removed; Klipper otherwise logs `Unknown command:"|"` on every
+  start. Check `klippy.log` for other options current Klipper rejects.
 - With `STOCK_COMPAT_MACROS=1` (default), an imported config also gets
   [stock-compat.cfg](overlay/templates/stock-compat.cfg), included from the
   top of `printer.cfg`. It recreates FLSUN's Klipper fork behaviour:

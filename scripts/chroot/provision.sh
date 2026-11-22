@@ -198,6 +198,8 @@ done
 #  * max_accel_to_decel was removed; minimum_cruise_ratio = 1 - a2d/max_accel
 #  * the main MCU (MKS Robin Nano CH340) is addressed by its USB id instead of
 #    the fixed pad port, so it works from any of the pad's USB sockets
+#  * a stray "|" after "{% endif %}" in FLSUN's LOAD_GCODE_OFFSETS macro is
+#    dropped; Klipper ran it as a command (Unknown command:"|") on every start
 upgrade_printer_cfg() {
     local cfg="$1"
     python3 - "$cfg" <<'PY'
@@ -214,6 +216,7 @@ if m_a2d:
         "minimum_cruise_ratio: %.3f  # converted from %s" % (ratio, m_a2d.group(0).strip()))
 text = re.sub(r'(?m)^(\[mcu\]\s*\n(?:[^\[\n].*\n)*?)serial:\s*/dev/serial/by-path/\S*ehci1-controller-usb-0:1\.4:1\.0-port0.*$',
               r'\1serial: /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0  # stock: fixed pad port 1.4', text)
+text = re.sub(r'(?m)^(\s*\{%-?\s*endif\s*-?%\})\|[ \t]*$', r'\1', text)
 open(path, "w").write(text)
 PY
 }
