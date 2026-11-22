@@ -118,6 +118,22 @@ log "Kernel clock_getres workaround"
 gcc -O2 -shared -fPIC -o /usr/local/lib/libclock_getres_fix.so "$BUILD/overlay/src/clock_getres_fix.c"
 echo /usr/local/lib/libclock_getres_fix.so > /etc/ld.so.preload
 
+if [ "$CAN_MODULES" = 1 ]; then
+    krel="$(cat "$BUILD/modules/kernel-release")"
+    log "CAN bus kernel modules for ${krel}"
+    cp -rT --no-preserve=ownership "$BUILD/modules/lib/modules" /lib/modules
+    # Only these modules exist outside the kernel image; empty indexes keep depmod quiet.
+    touch "/lib/modules/$krel/modules.order" "/lib/modules/$krel/modules.builtin" \
+          "/lib/modules/$krel/modules.builtin.modinfo"
+    depmod -a "$krel"
+    # gs_usb loads from its USB alias; the protocol modules are loaded up front.
+    printf 'can\ncan_raw\n' > /etc/modules-load.d/can.conf
+    cat > /etc/udev/rules.d/80-can.rules <<EOF
+# Bring CAN interfaces (e.g. a Klipper USB-to-CAN bridge) up at ${CAN_BITRATE} bit/s.
+SUBSYSTEM=="net", ACTION=="add", KERNEL=="can*", RUN+="/usr/sbin/ip link set %k type can bitrate ${CAN_BITRATE}", RUN+="/usr/sbin/ip link set %k txqueuelen 128", RUN+="/usr/sbin/ip link set %k up"
+EOF
+fi
+
 log "Overlay files"
 cp -rT --no-preserve=mode,ownership "$BUILD/overlay/rootfs" /
 chmod 755 /usr/local/sbin/speederpad-firstboot

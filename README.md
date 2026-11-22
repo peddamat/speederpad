@@ -6,8 +6,9 @@ Klipper, Moonraker, Mainsail, KlipperScreen, crowsnest and moonraker-timelapse.
 
 The vendor boot chain is reused unchanged from FLSUN's own restore image at
 build time: boot0, U-Boot, ATF/SCP, device tree and the Linux 4.9.191 kernel,
-plus the Wi-Fi firmware. No vendor binaries are stored in this repository. How
-the stock image works is documented in
+plus the Wi-Fi firmware. No vendor binaries are stored in this repository.
+CAN bus support, which the stock kernel lacks, is added as loadable modules
+built for that same kernel. How the stock image works is documented in
 [SPEEDERPAD_IMAGE_ANALYSIS.md](SPEEDERPAD_IMAGE_ANALYSIS.md).
 
 > **Status: experimental.** The image is built and verified offline (layout,
@@ -26,8 +27,11 @@ the stock image works is documented in
 - One of these build hosts:
   - Debian/Ubuntu Linux or WSL2, with root, and:
     `sudo apt install mmdebstrap qemu-user-static binfmt-support e2fsprogs xz-utils python3 git curl ca-certificates`
+  - For the CAN modules (`CAN_MODULES=1`, the default), also:
+    `sudo apt install build-essential bc flex bison gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu`
+    (on an arm64 host the native `gcc` is used instead).
   - Docker with `--privileged` support (`./docker-build.sh`).
-- About 25 GB of free disk space, and Internet access.
+- About 27 GB of free disk space, and Internet access.
 - A TF card of 8 GB or larger.
 
 ## Build
@@ -63,13 +67,14 @@ step (about 20 minutes); pending updates are applied during provisioning.
 Delete `work/cache/` to force a fresh bootstrap. Building on a native arm64
 host avoids qemu entirely and is several times faster.
 
-The build runs in three stages, which you can also run one at a time
-(`sudo ./build.sh extract|rootfs|image`):
+The build runs in four stages, which you can also run one at a time
+(`sudo ./build.sh extract|modules|rootfs|image`):
 
 | Stage | Script | What it does |
 |---|---|---|
 | extract | [01-extract-vendor.sh](scripts/01-extract-vendor.sh) | Verifies the stock card's checksums. Saves the card head (boot0, card U-Boot, partition tables, FAT) and every firmware item except the rootfs. Copies the Wi-Fi firmware and touchscreen X config, and the stock printer configs (from `STOCK_CONFIG_IMAGE` if set). Nothing else from the stock rootfs is used. |
-| rootfs | [02-build-rootfs.sh](scripts/02-build-rootfs.sh) | Runs `mmdebstrap` for Debian `SUITE`/`ARCH`, then [provision.sh](scripts/chroot/provision.sh) in a qemu chroot. That script runs the upstream Moonraker, KlipperScreen and crowsnest installers unattended and sets up the services. |
+| modules | [01b-build-modules.sh](scripts/01b-build-modules.sh) | With `CAN_MODULES=1`: reads the kernel, its embedded config and its exported-symbol CRCs out of the stock `boot.fex`, fetches the matching Allwinner linux-4.9 BSP source (about 1.1 GB, cached in `work/cache/kernel-src`), and builds `can`, `can-raw`, `can-bcm`, `can-dev` and `gs_usb`. It checks every imported symbol's CRC and the vermagic against the stock kernel and refuses modules that don't match. Takes a few minutes. |
+| rootfs | [02-build-rootfs.sh](scripts/02-build-rootfs.sh) | Runs `mmdebstrap` for Debian `SUITE`/`ARCH`, then [provision.sh](scripts/chroot/provision.sh) in a qemu chroot. That script runs the upstream Moonraker, KlipperScreen and crowsnest installers unattended, sets up the services and installs the CAN modules. |
 | image | [03-make-image.sh](scripts/03-make-image.sh) | Builds an ext4 `rootfs.fex` with the stock feature set (the 4.9 kernel can't mount newer ext4 features). Repacks the IMAGEWTY firmware with a regenerated `Vrootfs.fex` checksum, assembles the card image, verifies it and compresses it. |
 
 [sunxi_card.py](scripts/sunxi_card.py) is the format tool behind stage 3, and
@@ -144,6 +149,55 @@ To go back, flash the stock image the same way.
   `make && python3 scripts/update_mks_robin.py out/klipper.bin out/Robin_nano35.bin`
   and flash `Robin_nano35.bin` from the printer board's SD card.
 
+## CAN bus (USB-to-CAN bridge boards)
+
+With `CAN_MODULES=1` the image loads `can`/`can_raw` at boot, `gs_usb` binds
+to any Klipper USB-to-CAN bridge (USB id `1d50:606f`), and a udev rule brings
+each `can*` interface up at `CAN_BITRATE` (default 1000000) with
+`txqueuelen 128`. Nothing else is needed on the pad. This was tested with a
+Fly D5 (STM32F072) as the bridge.
+
+Bridge board firmware (Fly D5 example; build it on the pad if it has
+`arm-none-eabi-gcc`, or on a PC from the same Klipper commit):
+
+- Katapult (optional): STM32F072, 8 MHz crystal, USB on PA11/PA12,
+  application start offset 8KiB.
+- Klipper: STM32F072, 8KiB bootloader (no bootloader: 0), 8 MHz crystal,
+  communication interface "USB to CAN bus bridge (USB on PA11/PA12)",
+  CAN bus on PB8/PB9, CAN bus speed equal to `CAN_BITRATE`.
+
+The STM32 ROM DFU loader always works, whatever is in flash: hold BOOT, tap
+RESET, and the board appears as `0483:df11`. Then:
+
+```bash
+dfu-util -a 0 -d 0483:df11 -s 0x08002000 -D klipper.bin                 # Klipper after Katapult
+dfu-util -a 0 -d 0483:df11 -s 0x08000000:leave -D katapult.bin          # Katapult
+# (without Katapult: flash klipper.bin to 0x08000000:leave instead)
+```
+
+Check that each board gets a bootloader built for its own MCU. A Katapult
+built for the EBB42's STM32G0B1 flashed onto the D5's F072 crashes before USB
+starts, so the board never shows up in `lsusb`, and Klipper only reports
+"Unable to connect". `dfu-util -U` can read flash back for inspection: an
+initial stack pointer beyond the MCU's RAM (the F072 has 16 KiB, ending at
+`0x20004000`) means the wrong build.
+
+Find the node ids and put them in `printer.cfg` instead of `serial:`:
+
+```bash
+ip -details link show can0                                              # state ERROR-ACTIVE, bitrate 1000000
+~/klippy-env/bin/python ~/klipper/scripts/canbus_query.py can0          # canbus_uuid=..., Application: Klipper
+```
+
+```ini
+[mcu]
+canbus_uuid: <bridge uuid>
+```
+
+A toolhead board such as an EBB42 on the same bus gets its own `[mcu name]`
+section with its own `canbus_uuid`. Every board must use the same CAN speed
+and run firmware from the pad's Klipper version.
+
 ## Known limitations
 
 - The vendor kernel's arm64 vDSO `clock_getres()` reports a resolution of
@@ -155,8 +209,10 @@ To go back, flash the stock image the same way.
   preloads a small library ([clock_getres_fix.c](overlay/src/clock_getres_fix.c),
   via `/etc/ld.so.preload`) that routes `clock_getres()` to the correct
   system call.
-- The kernel is FLSUN's prebuilt 4.9.191, because no source is published. CAN
-  bus is not enabled, and kernel modules cannot be added.
+- The kernel is FLSUN's prebuilt 4.9.191, because no source is published.
+  Extra modules can be built for it from the matching Allwinner BSP tree
+  (see [SPEEDERPAD_IMAGE_ANALYSIS.md](SPEEDERPAD_IMAGE_ANALYSIS.md#kernel-modules));
+  only the CAN modules are built. Built-in options can't be changed.
 - Debian 12's systemd 252 is outside its recommended kernel range (4.15 and
   newer) on this 4.9 kernel. If the pad does not boot properly, rebuild with
   `SUITE=bullseye` (systemd 247; the Creality Sonic Pad port uses this).

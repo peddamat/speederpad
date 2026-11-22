@@ -115,9 +115,29 @@ The rootfs partition (about 14.5 GiB) is much larger than the 5.28 GiB ext4 insi
 - Embedded kernel config (`IKCONFIG`, `/proc/config.gz`): 3,227 options, SHA-256 `e791932b8da2fea81e1ec34af689b2d228111bab14a6425a414da88a49e6b0ca`. Recovered by REA `inspect-kernel-build-config` (Evidence `ev_ce61afb04cfb85b04d348488c7ed7f9c05bad227da46ab4e8f17ee207e4fcdd1`).
   - `CONFIG_ARCH_SUN50IW10P1=y`, `CONFIG_PREEMPT=y`, `HZ=250`, `CONFIG_LOCALVERSION=""`.
   - `CONFIG_COMPAT=y`: this is what lets the 32-bit armhf userspace run on the arm64 kernel.
-  - `CONFIG_MODULES=y` and `CONFIG_MODVERSIONS=y`: out-of-tree modules need this exact tree and `Module.symvers`.
+  - `CONFIG_MODULES=y` and `CONFIG_MODVERSIONS=y`, with no module signing and no forced loading: modules must be built from the matching source tree and config, and their imported symbol CRCs must match the kernel's. See [Kernel modules](#kernel-modules).
   - `CONFIG_CMDLINE="root=/dev/mmcblk0p5 rootwait rw"` with `CONFIG_CMDLINE_EXTEND=y`. The built-in `root=` is appended after U-Boot's arguments, so it points the kernel at GPT p5 = `rootfs`.
-  - Built in: `USB_ACM`, `USB_SERIAL_CH341`, `CP210X`, `FTDI_SIO`, `EXT4_FS`, `OVERLAY_FS`, `SQUASHFS`, `EFI_PARTITION`. **`CONFIG_CAN` is not set**, so CAN-bus toolheads would need a kernel rebuild.
+  - Built in: `USB_ACM`, `USB_SERIAL_CH341`, `CP210X`, `FTDI_SIO`, `EXT4_FS`, `OVERLAY_FS`, `SQUASHFS`, `EFI_PARTITION`. **`CONFIG_CAN` is not set.** The custom image adds CAN as loadable modules (see [Kernel modules](#kernel-modules)).
+
+### Kernel modules
+
+The stock kernel accepts modules built outside it, as long as each one matches it exactly. Proven on hardware on 2026-11-21: `can`, `can-raw`, `can-bcm`, `can-dev` and `gs_usb` load, and a Fly D5 USB-to-CAN bridge works as `can0`.
+
+- **Matching source.** The kernel is not mainline 4.9.191. It is Android Common 4.9 (`THREAD_INFO_IN_TASK`, `CPU_FREQ_TIMES` and similar Android options) plus Allwinner's sun50iw10 BSP. Built against mainline 4.9.191 with the stock config, about half of the imported symbol CRCs differ. Creality's [sonic_pad_os](https://github.com/CrealityTech/sonic_pad_os) (Sonic Pad, Allwinner T800, same sun50iw10 platform), at commit `7f37a7fbf4ad59907034715e3d967b9177de1cd4`, has `lichee/linux-4.9` at `SUBLEVEL=191`. With the stock config, every CRC checked matches (172 symbols for the first set of modules, 158 for the set the build uses), and `olddefconfig` keeps every stock option. It only adds `LCD_SUPPORT_LT9611`, a display driver that isn't involved. No core header depends on `CONFIG_CAN`, so enabling CAN as modules doesn't change any struct layout shared with the built-in kernel.
+- **Module.symvers from the binary.** The pad has no `/proc/kcore`, and `/proc/kallsyms` has no `__crc_*` entries. The CRCs are read from the `Image` instead ([kernel_tools.py](scripts/kernel_tools.py) `symvers`):
+  - The image isn't relocatable and has no KASLR, so file offset *n* is at virtual address `KIMAGE_VADDR + text_offset + n`, with `KIMAGE_VADDR = VA_START + 128 MiB` (`VA_BITS=39`, so the base is `0xffffff8008080000`).
+  - `__ksymtab` holds 16-byte `{value, name}` pairs. The table is found by locating the entry whose name pointer points at `"module_layout"`, then walking outward while both pointers stay inside the image. `__kcrctab` follows immediately, as one u64 per symbol.
+  - Result: 8,171 exported symbols. The file is identical whether extracted from the stock `boot.fex` or from the pad's own boot partition. The embedded config (`IKCFG_ST`) is identical to `/proc/config.gz`.
+- **Build.** The config is the stock one plus `CAN`, `CAN_RAW`, `CAN_BCM`, `CAN_DEV`, `CAN_CALC_BITTIMING` and `CAN_GS_USB` set to `m`. Then `modules_prepare`, the extracted `Module.symvers`, and `make M=net/can` and `M=drivers/net/can`. Modern host gcc needs `HOSTCFLAGS=-fcommon` for `dtc` and `KCFLAGS=-Wno-error`. The cross gcc 13 output loads fine into a kernel built with gcc 6.4. Vermagic is `4.9.191 SMP preempt mod_unload modversions aarch64`.
+- **Verification** ([kernel_tools.py](scripts/kernel_tools.py) `verify`). Matching vermagic and CRCs only prove the *interface* the modules see. So the build also compiles the kernel source files that export each imported symbol and compares their `__crc_*` values with the stock kernel's. Any mismatch fails the build.
+- **Loading without kmod.** The stock-style rootfs had no `insmod`/`modprobe`. The first test loaded the modules from Python through the `finit_module` syscall (273 on arm64). The image now installs `kmod`, runs `depmod`, and loads `can`/`can_raw` from `/etc/modules-load.d/can.conf`. `gs_usb` loads by USB alias. A udev rule sets the bitrate and `txqueuelen` and brings each `can*` link up. NetworkManager leaves CAN links alone; tested across a cold reboot.
+
+### Fly D5 bring-up notes (2026-11-21)
+
+- Symptom: Klipper stuck at "attempting to start", `mcu 'mcu': Unable to connect`, and no D5 in `lsusb` with any cable or port.
+- Cause: the D5 (STM32F072, 16 KiB RAM) had Katapult **built for the EBB42's STM32G0B1**. A DFU readback (`dfu-util -U`) showed an initial stack pointer of `0x20023ff8`, far beyond the F072's RAM, so the bootloader faulted before starting USB. The Klipper image at `0x08002000` was a correct F072 build.
+- Fix: rebuilt both on the pad. Katapult for F072 (8 MHz, USB PA11/PA12, 8 KiB application offset); Klipper v0.14.0 as a USB-to-CAN bridge (CAN PB8/PB9, 1 Mbit/s). Flashed them through the ROM DFU loader (BOOT + RESET, `0483:df11`): Klipper to `0x08002000`, then Katapult to `0x08000000:leave`. The board then enumerates as `1d50:606f`, `can0` reaches ERROR-ACTIVE, and `canbus_query.py` reports the node.
+- The EBB42 may have the opposite mistake (the D5's Katapult). Check it before relying on it.
 
 ## Root filesystem (`rootfs.fex`)
 
@@ -191,7 +211,7 @@ KlipperScreen changes:
 
 - [Flsun3d/Flsun_Speeder_Pad](https://github.com/Flsun3d/Flsun_Speeder_Pad) documents the TF-card restore and provides printer-MCU firmware/configs. It has no Linux image build recipe. The card README links FLSUN's [klipper_fs](https://github.com/Flsun3d/klipper_fs), [moonraker_fs](https://github.com/Flsun3d/moonraker_fs) and [mainsail_fs](https://github.com/Flsun3d/mainsail_fs). The restore is written with Raspberry Pi Imager.
 - Upstream Klipper `master` is `b670adc92bf92b304e76c3c2f36f5d8f98a4e2f1` (2026-11-19). `klippy/klippy.py` still has `#!/usr/bin/env python2`, and `scripts/install-debian.sh` still runs `virtualenv -p python2` (re-verified). The Python 2.7 environment does not by itself block an upstream update. Current dependencies still need testing.
-- [Issue #8](https://github.com/Flsun3d/Flsun_Speeder_Pad/issues/8) asks for the 4.9.191 kernel source and remains unanswered. No public source for this BSP kernel or U-Boot has been found. The embedded `.config` above helps, but a matching Allwinner R818 longan 4.9 tree is still needed for a rebuild.
+- [Issue #8](https://github.com/Flsun3d/Flsun_Speeder_Pad/issues/8) asks for the 4.9.191 kernel source and remains unanswered. FLSUN's exact tree is unpublished. Creality's [sonic_pad_os](https://github.com/CrealityTech/sonic_pad_os) `lichee/linux-4.9` (same Allwinner sun50iw10 BSP, 4.9.191) matches it closely enough to build modules with verified symbol CRCs; see [Kernel modules](#kernel-modules). Whether it would reproduce the whole kernel (display, board drivers) is untested. No U-Boot source has been matched.
 
 ## V400 printer-MCU path
 
@@ -243,7 +263,7 @@ Carried over; not affected by the findings above.
 | U-Boot | Allwinner 2018.05 fork | Mainline U-Boot (`liontron-h-a133l_defconfig` is a starting point); a Speeder Pad defconfig/DTS must be written |
 | ATF (`monitor`) | Allwinner build | Mainline TF-A `plat/allwinner/sun50i_a133` |
 | SCP (`scp`, ARISC) | Closed blob | Optional for boot; it mainly affects power management/suspend |
-| Linux kernel | Allwinner 4.9.191 BSP, source unpublished | Mainline Linux has `sun50i-a100.dtsi` and A133 boards (`liontron-h-a133l`, `helperboard`, `teclast-p80`). A Speeder Pad DTS must be written. |
+| Linux kernel | Allwinner 4.9.191 BSP, FLSUN's source unpublished (Creality's sonic_pad_os tree matches it for module builds) | Mainline Linux has `sun50i-a100.dtsi` and A133 boards (`liontron-h-a133l`, `helperboard`, `teclast-p80`). A Speeder Pad DTS must be written. |
 | Display (DE/TCON) | BSP `sunxi-disp` | **Not in mainline**: the `sun4i` DRM driver has no A100/A133 compatibles, and `sun50i-a100.dtsi` has no display nodes |
 | Touch (GT9xx) | BSP `gt9xxf_ts` | Mainline `goodix` driver |
 | GPU (GE8300) | BSP PowerVR blob | No mainline driver; software rendering only |
@@ -263,6 +283,7 @@ The chosen route keeps the vendor boot chain and replaces the rootfs with a fres
   - verifies the stock card;
   - saves the card head (sectors 0–50,175) and all IMAGEWTY items except `rootfs.fex`;
   - copies the Wi-Fi firmware (`fw_bcm43438a1.bin`, `nvram.txt` for the built-in `bcmdhd` driver), the touchscreen X config, and the stock printer configs.
+- Stage 1b, [01b-build-modules.sh](scripts/01b-build-modules.sh): builds and verifies the CAN modules for the stock kernel, as described in [Kernel modules](#kernel-modules). It caches the kernel source and skips the build when the kernel, source ref and scripts are unchanged.
 - Stage 2, [02-build-rootfs.sh](scripts/02-build-rootfs.sh):
   - `mmdebstrap` builds Debian bookworm arm64 by default;
   - [provision.sh](scripts/chroot/provision.sh) runs in a qemu chroot. It installs Klipper (Python 3 venv, prebuilt C helper), Moonraker, KlipperScreen and crowsnest through their own unattended installers, plus Mainsail, moonraker-timelapse and nginx.

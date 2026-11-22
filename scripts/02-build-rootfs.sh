@@ -7,6 +7,8 @@ require_root
 require_cmds mmdebstrap python3 git curl dpkg-deb
 ensure_binfmt "$ARCH"
 [ -f "${STOCK_DIR}/.extract-done" ] || die "run stage 1 (extract) first"
+[ "$CAN_MODULES" != 1 ] || [ -f "${MODULES_DIR}/.build-done" ] \
+    || die "run stage 1b (modules) first, or set CAN_MODULES=0"
 
 components="main contrib non-free"
 [ "$SUITE" != bullseye ] && components="$components non-free-firmware"
@@ -18,7 +20,7 @@ packages=(
     openssh-server avahi-daemon libnss-mdns
     network-manager wpasupplicant iw wireless-regdb rfkill
     nginx git curl wget unzip xz-utils less nano usbutils iproute2 iputils-ping
-    e2fsprogs systemd-timesyncd
+    e2fsprogs systemd-timesyncd kmod
     python3 python3-venv python3-virtualenv python3-dev virtualenv
     build-essential libffi-dev libncurses-dev libusb-dev libusb-1.0-0 pkg-config
 )
@@ -70,12 +72,13 @@ mkdir -p "$stage"
 cp -a "${REPO_DIR}/scripts/chroot/provision.sh" "$stage/"
 cp -a "${REPO_DIR}/overlay" "$stage/overlay"
 cp -a "$VENDOR_DIR" "$stage/vendor"
+if [ "$CAN_MODULES" = 1 ]; then cp -a "$MODULES_DIR" "$stage/modules"; fi
 {
     for v in SUITE HOSTNAME_PAD USERNAME PASSWORD TIMEZONE LOCALE WIFI_SSID WIFI_PSK \
              INSTANCES IMPORT_STOCK_CONFIG STOCK_COMPAT_MACROS KLIPPER_REPO KLIPPER_REF MOONRAKER_REPO \
              MOONRAKER_REF KLIPPERSCREEN_REPO KLIPPERSCREEN_REF MAINSAIL_VERSION \
              INSTALL_CROWSNEST CROWSNEST_REPO CROWSNEST_REF INSTALL_TIMELAPSE \
-             TIMELAPSE_REPO TIMELAPSE_REF; do
+             TIMELAPSE_REPO TIMELAPSE_REF CAN_MODULES CAN_BITRATE; do
         printf '%s=%q\n' "$v" "${!v}"
     done
 } > "$stage/build.env"
